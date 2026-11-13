@@ -15,7 +15,7 @@ Aplicación Flask para la gestión de animales, ferias, publicaciones y noticias
 
 ## Requisitos
 
-- Python 3.11.x
+- Python 3.12.x
 - pip
 
 ## Instalación local
@@ -42,6 +42,28 @@ Aplicación Flask para la gestión de animales, ferias, publicaciones y noticias
    python app.py
    ```
 5. Abre `http://127.0.0.1:5000` en tu navegador.
+
+## Despliegue en Coolify
+
+El despliegue de Coolify ejecuta el sitio Flask completo: las páginas web y el backend comparten una aplicación y una base de datos, por lo que las cuentas y publicaciones son visibles desde un mismo servidor.
+
+### Preparación
+
+1. En Coolify, crea un recurso desde este repositorio y selecciona el archivo `docker-compose.yml` como configuración de Compose.
+2. Define estas variables en el recurso, sin guardarlas en Git:
+   - `SECRET_KEY`: secreto aleatorio para las sesiones de Flask.
+   - `POSTGRES_PASSWORD`: contraseña aleatoria formada solo por letras y números hexadecimales, porque se usa dentro de `DATABASE_URL`.
+   - `POSTGRES_DB` y `POSTGRES_USER` son opcionales; por defecto ambos se configuran como `yamitas`.
+
+   Puedes generar los dos secretos en una terminal que tenga OpenSSL con `openssl rand -hex 32`. Usa un valor distinto para cada variable.
+3. Configura el dominio HTTPS de Coolify para el servicio `app`, puerto `8000`, y despliega. No publiques el servicio `db`: la aplicación se conecta a PostgreSQL por la red privada de Compose.
+4. Comprueba que `https://tu-dominio/healthz` responda `{"status":"ok"}`. El endpoint también verifica la conexión a la base de datos.
+
+Compose conserva los datos de PostgreSQL y las imágenes subidas en los volúmenes `postgres_data` y `uploads`. Configura y prueba copias de seguridad de esos volúmenes antes de abrir la beta. No elimines los volúmenes al actualizar o recrear el recurso.
+
+El contenedor requiere `SECRET_KEY` y PostgreSQL al ejecutarse en producción; no arrancará con secretos por defecto ni con SQLite efímero. Mantiene un worker Gunicorn y cuatro threads, adecuado como punto de partida para una beta pequeña. El actual actualizador de noticias corre dentro del proceso web: no escales réplicas de `app` sin antes separar ese scheduler para evitar ejecuciones duplicadas.
+
+Este despliegue crea una base nueva y **no importa automáticamente** usuarios, publicaciones ni imágenes de una instalación local. Antes de abrir la beta, decide si quieres iniciar con datos vacíos o preparar una migración de `yamitas.db` y `static/uploads`.
 
 ## Despliegue en Vercel
 
@@ -95,4 +117,3 @@ git push -u origin main
 
 - El despliegue en Vercel es dinámico y mantiene Flask, SQLite y rutas HTML.
 - Si buscas solo una versión estática, `build_static.py` puede generar archivos en `public/`, pero perderás login y funciones de backend.
-

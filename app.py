@@ -23,7 +23,11 @@ import re
 import markdown
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'tu_clave_secreta_aqui')
+APP_ENV = os.environ.get('APP_ENV', 'development').lower()
+secret_key = os.environ.get('SECRET_KEY')
+if APP_ENV == 'production' and not secret_key:
+    raise RuntimeError('SECRET_KEY must be configured in production.')
+app.config['SECRET_KEY'] = secret_key or 'tu_clave_secreta_aqui'
 
 
 def is_vercel_deployment():
@@ -34,8 +38,13 @@ def is_vercel_deployment():
     )
 
 VERCEL_DEPLOY = is_vercel_deployment()
+SCHEDULER_ENABLED = os.environ.get(
+    'ENABLE_SCHEDULER', str(not VERCEL_DEPLOY)
+).lower() in ('1', 'true', 'yes')
 
 database_url = os.environ.get('DATABASE_URL')
+if APP_ENV == 'production' and not database_url:
+    raise RuntimeError('DATABASE_URL must be configured in production.')
 if not database_url:
     if VERCEL_DEPLOY:
         database_url = 'sqlite:////tmp/yamitas.db'
@@ -49,11 +58,17 @@ if not database_url:
         except Exception:
             database_url = 'sqlite:////tmp/yamitas.db'
 
+if APP_ENV == 'production' and database_url.startswith('sqlite:'):
+    raise RuntimeError('A persistent PostgreSQL DATABASE_URL is required in production.')
+
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['REMEMBER_COOKIE_DURATION'] = int(os.environ.get('REMEMBER_COOKIE_DURATION', 86400 * 30))  # 30 días
 app.config['REMEMBER_COOKIE_SECURE'] = os.environ.get('REMEMBER_COOKIE_SECURE', 'False').lower() in ('1', 'true', 'yes')
 app.config['REMEMBER_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() in ('1', 'true', 'yes')
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 default_upload_folder = os.path.join(app.root_path, 'static', 'uploads')
 if VERCEL_DEPLOY:
     default_upload_folder = '/tmp/uploads'
@@ -65,6 +80,8 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 try:
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 except OSError:
+    if APP_ENV == 'production':
+        raise
     # Fallback to a writeable temp directory on serverless platforms
     fallback_upload_folder = os.path.join('/tmp', 'uploads')
     try:
@@ -83,6 +100,11 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Necesitas iniciar sesión para acceder a esta página.'
 login_manager.login_message_category = 'warning'
+
+@app.route('/healthz')
+def healthz():
+    db.session.execute(text('SELECT 1'))
+    return {'status': 'ok'}
 
 
 @app.context_processor
@@ -670,12 +692,6 @@ def update_all_sources():
         # kept for compatibility, but these items are not shown in the main carousel.
 
 
-# create and start scheduler only when running as a long-lived server
-if not VERCEL_DEPLOY:
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=update_all_sources, trigger='interval', minutes=15, next_run_time=datetime.now())
-    scheduler.start()
-
 @app.route('/logout')
 @login_required
 def logout():
@@ -723,7 +739,7 @@ def ensure_producto_columns():
     if 'usuario_id' not in existing:
         migrations.append("ALTER TABLE producto ADD COLUMN usuario_id INTEGER")
     if 'fecha_creacion' not in existing:
-        migrations.append("ALTER TABLE producto ADD COLUMN fecha_creacion DATETIME")
+        migrations.append("ALTER TABLE producto ADD COLUMN fecha_creacion TIMESTAMP")
 
     if migrations:
         with db.engine.connect() as conn:
@@ -1485,15 +1501,99 @@ OLLAMA_SYSTEM_PROMPT = (
     "Responde en español con consejos prácticos sobre alimentación, salud, reproducción, venta y crianza. "
     "Habla de forma amable y clara. Si no sabes algo, dilo honestamente y recomienda consultar a un especialista."
 )
-OLLAMA_COMMAND = os.environ.get(
-    'OLLAMA_COMMAND',
+
+DEFAULT_OLLAMA_COMMAND = (
     r'C:\Users\renzo\AppData\Local\Programs\Ollama\ollama.exe' if os.name == 'nt' else 'ollama'
 )
+
+
+def get_ollama_command():
+    command = os.environ.get('OLLAMA_COMMAND') or DEFAULT_OLLAMA_COMMAND
+    if os.path.isabs(command):
+        if os.path.exists(command):
+            return command
+        return shutil.which(command)
+    return shutil.which(command)
+
+
+def parse_ollama_list_output(output):
+    lines = output.strip().splitlines()
+    if len(lines) <= 1:
+        return []
+    models = []
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        parts = line.strip().split()
+        if parts:
+            models.append(parts[0])
+    return models
+
+
+def get_installed_ollama_models():
+    command = get_ollama_command()
+    if not command:
+        return []
+    try:
+        result = subprocess.run(
+            [command, 'list'],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return []
+        return parse_ollama_list_output(result.stdout)
+    except Exception:
+        return []
+
+
+def resolve_ollama_model(model_name, installed_models=None):
+    if installed_models is None:
+        installed_models = get_installed_ollama_models()
+    if model_name in installed_models:
+        return model_name
+
+    short_name = model_name.split(':')[0]
+    for candidate in installed_models:
+        if candidate == short_name or candidate.startswith(f"{short_name}:"):
+            return candidate
+    return model_name
+
+
+def ollama_status():
+    command = get_ollama_command()
+    installed_models = get_installed_ollama_models()
+    resolved_model = resolve_ollama_model(OLLAMA_MODEL, installed_models)
+    return {
+        'ollama_command': command or '',
+        'ollama_available': bool(command),
+        'installed_models': installed_models,
+        'requested_model': OLLAMA_MODEL,
+        'resolved_model': resolved_model,
+        'model_installed': resolved_model in installed_models,
+    }
 
 
 def call_ollama(user_prompt):
     if not user_prompt:
         return None, 'El mensaje no puede estar vacío.'
+
+    command = get_ollama_command()
+    if not command:
+        return None, (
+            'Ollama no está instalado o no se encuentra su ejecutable. '
+            'Instala Ollama y configura la variable de entorno OLLAMA_COMMAND si es necesario.'
+        )
+
+    installed_models = get_installed_ollama_models()
+    resolved_model = resolve_ollama_model(OLLAMA_MODEL, installed_models)
+    if resolved_model not in installed_models:
+        return None, (
+            f'El modelo "{OLLAMA_MODEL}" no está instalado en Ollama. '
+            'Instala el modelo con `ollama pull \"{OLLAMA_MODEL}\"` o cambia OLLAMA_MODEL.'
+        )
 
     prompt = (
         f"{OLLAMA_SYSTEM_PROMPT}\n\n"
@@ -1501,18 +1601,31 @@ def call_ollama(user_prompt):
         f"IA: "
     )
 
-    result = subprocess.run(
-        [OLLAMA_COMMAND, "run", OLLAMA_MODEL, prompt],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [command, 'run', resolved_model, prompt],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=int(os.environ.get('OLLAMA_TIMEOUT', 60)),
+        )
+    except subprocess.TimeoutExpired:
+        return None, (
+            'La llamada a Ollama excedió el tiempo de espera. '
+            'Aumenta OLLAMA_TIMEOUT o prueba con un modelo más liviano.'
+        )
+    except Exception as e:
+        return None, f'Error al ejecutar Ollama: {e}'
 
     if result.returncode != 0:
         error_text = result.stderr.strip() or 'Error al ejecutar Ollama.'
         return None, error_text
 
-    return result.stdout.strip(), None
+    output = result.stdout.strip()
+    if not output:
+        return None, 'Ollama devolvió una respuesta vacía.'
+
+    return output, None
 
 
 @app.route('/api/chat', methods=['POST'])
@@ -1529,9 +1642,14 @@ def api_chat():
     return {'response': response_text}
 
 
+@app.route('/api/ollama-status')
+def api_ollama_status():
+    return ollama_status()
+
+
 @app.route('/asistente-ia')
 def asistente_ia():
-    return render_template('asistente_ia.html')
+    return render_template('asistente_ia.html', ollama_status=ollama_status())
 
 
 def load_markdown_subconejos():
@@ -1682,15 +1800,8 @@ def sync_global_sources_from_json():
 
 def initialize_app():
     with app.app_context():
-        try:
-            db.create_all()
-        except Exception:
-            pass
-
-        try:
-            ensure_producto_columns()
-        except Exception:
-            pass
+        db.create_all()
+        ensure_producto_columns()
 
         try:
             seed_default_consejos()
@@ -1707,13 +1818,18 @@ def initialize_app():
         except Exception:
             pass
 
-        if not VERCEL_DEPLOY:
+        if not VERCEL_DEPLOY and not SCHEDULER_ENABLED:
             try:
                 update_all_sources()
             except Exception:
                 pass
 
 initialize_app()
+
+if SCHEDULER_ENABLED:
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=update_all_sources, trigger='interval', minutes=15, next_run_time=datetime.now())
+    scheduler.start()
 
 if __name__ == '__main__':
     app.run(
