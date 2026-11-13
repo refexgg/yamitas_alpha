@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, abort, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from flask_socketio import SocketIO, emit, join_room
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import inspect, text, or_
@@ -29,6 +30,7 @@ import markdown
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
+socketio = SocketIO(app, async_mode='threading')
 
 
 def is_vercel_deployment():
@@ -1244,13 +1246,15 @@ def iniciar_conversacion(producto_id):
         db.session.add(conversacion)
         db.session.flush()
 
-    db.session.add(Mensaje(
+    message = Mensaje(
         conversacion_id=conversacion.id,
         remitente_id=current_user.id,
         contenido=contenido
-    ))
+    )
+    db.session.add(message)
     conversacion.fecha_actualizacion = datetime.now()
     db.session.commit()
+    emit_conversation_message(conversacion, message)
     flash('Tu consulta fue enviada al vendedor.', 'success')
     return redirect(url_for('mensajes', conversacion=conversacion.id))
 
@@ -1318,15 +1322,142 @@ def enviar_mensaje(conversation_id):
     elif len(content) > 2000:
         flash('El mensaje no puede superar los 2000 caracteres.', 'warning')
     else:
-        db.session.add(Mensaje(
+        message = Mensaje(
             conversacion_id=conversation.id,
             remitente_id=current_user.id,
             contenido=content
-        ))
+        )
+        db.session.add(message)
         conversation.fecha_actualizacion = datetime.now()
         db.session.commit()
+        emit_conversation_message(conversation, message)
         flash('Mensaje enviado.', 'success')
     return redirect(url_for('mensajes', conversacion=conversation.id))
+
+
+def emit_conversation_message(conversation, message):
+    payload = {
+        'id': message.id,
+        'conversation_id': conversation.id,
+        'product_name': conversation.producto_nombre,
+        'buyer_id': conversation.comprador_id,
+        'buyer_name': conversation.comprador.username,
+        'seller_id': conversation.vendedor_id,
+        'seller_name': conversation.vendedor.username,
+        'sender_id': message.remitente_id,
+        'sender_name': message.remitente.username,
+        'content': message.contenido,
+        'created_at': message.fecha_creacion.isoformat()
+    }
+    socketio.emit('new_message', payload, to=f'user_{conversation.comprador_id}')
+    socketio.emit('new_message', payload, to=f'user_{conversation.vendedor_id}')
+
+
+def socket_user_can_access(conversation_id):
+    return (
+        current_user.is_authenticated
+        and current_user.is_active
+        and Conversacion.query.filter(
+            Conversacion.id == conversation_id,
+            or_(
+                Conversacion.comprador_id == current_user.id,
+                Conversacion.vendedor_id == current_user.id
+            )
+        ).first()
+    )
+
+
+def valid_socket_csrf(data):
+    token = data.get('csrf_token') if isinstance(data, dict) else None
+    expected_token = session.get('_admin_csrf_token', '')
+    return (
+        isinstance(token, str)
+        and bool(expected_token)
+        and hmac.compare_digest(token, expected_token)
+    )
+
+
+@socketio.on('connect')
+def socket_connect(auth=None):
+    if not current_user.is_authenticated or not current_user.is_active:
+        return False
+    join_room(f'user_{current_user.id}')
+
+
+@socketio.on('join_conversation')
+def socket_join_conversation(data):
+    if not valid_socket_csrf(data):
+        return {'ok': False, 'error': 'Sesión de seguridad inválida. Recarga la página.'}
+
+    conversation_id = data.get('conversation_id')
+    if not isinstance(conversation_id, int) or isinstance(conversation_id, bool):
+        return {'ok': False, 'error': 'Conversación inválida.'}
+    if not socket_user_can_access(conversation_id):
+        return {'ok': False, 'error': 'No tienes permiso para acceder a esta conversación.'}
+
+    join_room(f'conversation_{conversation_id}')
+    return {'ok': True}
+
+
+@socketio.on('send_message')
+def socket_send_message(data):
+    if not valid_socket_csrf(data):
+        return {'ok': False, 'error': 'Sesión de seguridad inválida. Recarga la página.'}
+    if not isinstance(data, dict):
+        return {'ok': False, 'error': 'Solicitud inválida.'}
+
+    conversation_id = data.get('conversation_id')
+    content = data.get('content')
+    if not isinstance(conversation_id, int) or isinstance(conversation_id, bool):
+        return {'ok': False, 'error': 'Conversación inválida.'}
+    if not socket_user_can_access(conversation_id):
+        return {'ok': False, 'error': 'No tienes permiso para enviar mensajes en esta conversación.'}
+    if not isinstance(content, str) or not content.strip():
+        return {'ok': False, 'error': 'El mensaje no puede estar vacío.'}
+    content = content.strip()
+    if len(content) > 2000:
+        return {'ok': False, 'error': 'El mensaje no puede superar los 2000 caracteres.'}
+
+    conversation = db.session.get(Conversacion, conversation_id)
+    message = Mensaje(
+        conversacion_id=conversation_id,
+        remitente_id=current_user.id,
+        contenido=content
+    )
+    conversation.fecha_actualizacion = datetime.now()
+    db.session.add(message)
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception('No se pudo guardar un mensaje en la conversación %s', conversation_id)
+        return {'ok': False, 'error': 'No se pudo guardar el mensaje. Inténtalo nuevamente.'}
+
+    emit_conversation_message(conversation, message)
+    return {'ok': True}
+
+
+@socketio.on('typing')
+def socket_typing(data):
+    if not valid_socket_csrf(data) or not isinstance(data, dict):
+        return
+    conversation_id = data.get('conversation_id')
+    if not isinstance(conversation_id, int) or isinstance(conversation_id, bool):
+        return
+    if not socket_user_can_access(conversation_id):
+        return
+
+    emit(
+        'typing',
+        {
+            'user_id': current_user.id,
+            'username': current_user.username,
+            'is_typing': bool(data.get('is_typing'))
+        },
+        to=f'conversation_{conversation_id}',
+        include_self=False
+    )
+
 
 @app.route('/producto/<int:producto_id>/quitar_venta', methods=['POST'])
 @login_required
@@ -1336,10 +1467,6 @@ def quitar_venta(producto_id):
         abort(403)
 
     nombre_producto = producto.nombre
-    Conversacion.query.filter_by(producto_id=producto.id).update(
-        {Conversacion.producto_id: None},
-        synchronize_session=False
-    )
     Conversacion.query.filter_by(producto_id=producto.id).update(
         {Conversacion.producto_id: None},
         synchronize_session=False
@@ -2126,7 +2253,8 @@ def initialize_app():
 initialize_app()
 
 if __name__ == '__main__':
-    app.run(
+    socketio.run(
+        app,
         host='0.0.0.0',
         port=int(os.environ.get('PORT', 5000)),
         debug=os.environ.get('FLASK_DEBUG', 'False').lower() in ('1', 'true', 'yes')
