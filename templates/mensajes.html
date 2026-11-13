@@ -77,7 +77,7 @@
                                 {{ conversacion_activa.producto_nombre }}
                             </a>
                         </div>
-                        <span id="connection-status" class="small text-muted flex-shrink-0" role="status">Conectando…</span>
+                        <span class="small text-muted flex-shrink-0">Consulta sobre un animal</span>
                     </div>
                 </div>
                 <div id="message-history" class="message-history" aria-live="polite" aria-label="Mensajes de la conversación">
@@ -98,18 +98,17 @@
                         </div>
                     {% endfor %}
                 </div>
-                <div id="typing-indicator" class="typing-indicator text-muted small" aria-live="polite"></div>
                 <div class="conversation-composer">
-                    <div id="send-error" class="small text-danger mb-2" role="alert"></div>
-                    <form id="message-form" class="d-flex align-items-end gap-2">
+                    <form id="message-form" class="d-flex align-items-end gap-2" method="POST" action="{{ url_for('enviar_mensaje', conversation_id=conversacion_activa.id) }}">
+                        <input type="hidden" name="csrf_token" value="{{ admin_csrf_token() }}">
                         <label for="message-input" class="visually-hidden">Escribe tu mensaje</label>
-                        <textarea id="message-input" class="form-control" rows="1" maxlength="2000"
-                                  placeholder="Escribe un mensaje… (Enter para enviar)" required></textarea>
+                        <textarea id="message-input" name="contenido" class="form-control" rows="1" maxlength="2000"
+                                  placeholder="Escribe un mensaje…" required></textarea>
                         <button id="send-button" type="submit" class="btn btn-success" aria-label="Enviar mensaje">
                             <i class="fas fa-paper-plane"></i>
                         </button>
                     </form>
-                    <div class="small text-muted mt-1">Máximo 2000 caracteres. Shift + Enter para un nuevo renglón.</div>
+                    <div class="small text-muted mt-1">Máximo 2000 caracteres.</div>
                 </div>
             {% else %}
                 <div class="conversation-placeholder text-center text-muted">
@@ -125,11 +124,6 @@
 {% include "_footer.html" %}
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-{% if conversacion_activa %}
-    <script>window.yamitasUserId = {{ usuario_id|tojson }};</script>
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-    <script src="{{ url_for('static', filename='js/mensajes.js') }}?v=chat-1" defer></script>
-{% endif %}
 <script src="{{ url_for('static', filename='js/pwa.js') }}"></script>
 </body>
 </html>

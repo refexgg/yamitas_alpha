@@ -98,6 +98,7 @@ def inject_active_page():
         'ferias': 'ferias',
         'publicar': 'publicar',
         'perfil': 'perfil',
+        'mensajes': 'mensajes',
         'registro_animales': 'registro_animales',
         'admin': 'admin',
         'admin_content': 'admin',
@@ -152,6 +153,7 @@ class User(UserMixin, db.Model):
     is_admin = db.Column(db.Boolean, nullable=False, default=False, server_default=db.false())
     is_active = db.Column(db.Boolean, nullable=False, default=True, server_default=db.true())
 
+
 class Producto(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     nombre = db.Column(db.String(100), nullable=False)
@@ -170,6 +172,38 @@ class Producto(db.Model):
     usuario_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     usuario = db.relationship('User', backref=db.backref('productos', lazy=True))
     fecha_creacion = db.Column(db.DateTime, default=db.func.current_timestamp())
+
+
+class Conversacion(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    producto_id = db.Column(db.Integer, db.ForeignKey('producto.id', ondelete='SET NULL'), nullable=True)
+    producto_nombre = db.Column(db.String(100), nullable=False)
+    comprador_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    vendedor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    fecha_creacion = db.Column(db.DateTime, default=db.func.current_timestamp(), nullable=False)
+    fecha_actualizacion = db.Column(db.DateTime, default=db.func.current_timestamp(), nullable=False)
+
+    comprador = db.relationship('User', foreign_keys=[comprador_id])
+    vendedor = db.relationship('User', foreign_keys=[vendedor_id])
+    producto = db.relationship('Producto')
+    mensajes = db.relationship(
+        'Mensaje',
+        back_populates='conversacion',
+        cascade='all, delete-orphan',
+        order_by='Mensaje.fecha_creacion, Mensaje.id'
+    )
+
+
+class Mensaje(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    conversacion_id = db.Column(db.Integer, db.ForeignKey('conversacion.id'), nullable=False, index=True)
+    remitente_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    contenido = db.Column(db.String(2000), nullable=False)
+    fecha_creacion = db.Column(db.DateTime, default=db.func.current_timestamp(), nullable=False)
+
+    conversacion = db.relationship('Conversacion', back_populates='mensajes')
+    remitente = db.relationship('User')
+
 
 class Evento(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -480,6 +514,16 @@ def login():
         if usuario and usuario.is_active and check_password_hash(usuario.password, password):
             login_user(usuario, remember=True)
             flash('Has iniciado sesión correctamente.', 'success')
+            next_url = request.args.get('next', '')
+            parsed_next_url = urlparse(next_url)
+            if (
+                next_url.startswith('/')
+                and not next_url.startswith('//')
+                and not parsed_next_url.scheme
+                and not parsed_next_url.netloc
+                and '\\' not in next_url
+            ):
+                return redirect(next_url)
             return redirect(url_for('index'))
 
         if usuario and not usuario.is_active:
@@ -889,6 +933,19 @@ def admin_delete_user(user_id):
 
     username = user.username
     try:
+        conversation_ids = db.session.query(Conversacion.id).filter(
+            or_(
+                Conversacion.comprador_id == user.id,
+                Conversacion.vendedor_id == user.id
+            )
+        )
+        Mensaje.query.filter(Mensaje.conversacion_id.in_(conversation_ids)).delete(synchronize_session=False)
+        Conversacion.query.filter(
+            or_(
+                Conversacion.comprador_id == user.id,
+                Conversacion.vendedor_id == user.id
+            )
+        ).delete(synchronize_session=False)
         source_ids = [source.id for source in NewsSource.query.filter_by(usuario_id=user.id).all()]
         if source_ids:
             NewsItem.query.filter(NewsItem.source_id.in_(source_ids)).delete(synchronize_session=False)
@@ -936,6 +993,10 @@ def admin_delete_publication(publication_id):
     validate_admin_csrf()
     publication = Producto.query.get_or_404(publication_id)
     name = publication.nombre
+    Conversacion.query.filter_by(producto_id=publication.id).update(
+        {Conversacion.producto_id: None},
+        synchronize_session=False
+    )
     db.session.delete(publication)
     db.session.commit()
     flash(f'La publicación "{name}" fue eliminada.', 'success')
@@ -1149,11 +1210,123 @@ def reproductores():
 @app.route('/producto/<int:producto_id>')
 def detalle_producto(producto_id):
     producto = Producto.query.get_or_404(producto_id)
+    return render_template('producto_detalle.html', producto=producto)
+
+
+@app.route('/producto/<int:producto_id>/consultar', methods=['POST'])
+@login_required
+def iniciar_conversacion(producto_id):
+    validate_admin_csrf()
+    producto = Producto.query.get_or_404(producto_id)
+    if producto.usuario_id == current_user.id:
+        abort(403)
+
+    contenido = request.form.get('contenido', '').strip()
+    if not contenido:
+        flash('Escribe una consulta para el vendedor.', 'warning')
+        return redirect(url_for('detalle_producto', producto_id=producto.id))
+    if len(contenido) > 2000:
+        flash('La consulta no puede superar los 2000 caracteres.', 'warning')
+        return redirect(url_for('detalle_producto', producto_id=producto.id))
+
+    conversacion = Conversacion.query.filter_by(
+        producto_id=producto.id,
+        comprador_id=current_user.id,
+        vendedor_id=producto.usuario_id
+    ).first()
+    if conversacion is None:
+        conversacion = Conversacion(
+            producto_id=producto.id,
+            producto_nombre=producto.nombre,
+            comprador_id=current_user.id,
+            vendedor_id=producto.usuario_id
+        )
+        db.session.add(conversacion)
+        db.session.flush()
+
+    db.session.add(Mensaje(
+        conversacion_id=conversacion.id,
+        remitente_id=current_user.id,
+        contenido=contenido
+    ))
+    conversacion.fecha_actualizacion = datetime.now()
+    db.session.commit()
+    flash('Tu consulta fue enviada al vendedor.', 'success')
+    return redirect(url_for('mensajes', conversacion=conversacion.id))
+
+
+@app.route('/mensajes', methods=['GET'])
+@login_required
+def mensajes():
+    user_conversations = Conversacion.query.filter(
+        or_(
+            Conversacion.comprador_id == current_user.id,
+            Conversacion.vendedor_id == current_user.id
+        )
+    ).order_by(Conversacion.fecha_actualizacion.desc(), Conversacion.id.desc()).all()
+
+    conversations = []
+    for conversation in user_conversations:
+        contact = (
+            conversation.vendedor
+            if conversation.comprador_id == current_user.id
+            else conversation.comprador
+        )
+        last_message = Mensaje.query.filter_by(
+            conversacion_id=conversation.id
+        ).order_by(Mensaje.fecha_creacion.desc(), Mensaje.id.desc()).first()
+        conversations.append({
+            'conversacion': conversation,
+            'contacto': contact,
+            'ultimo_mensaje': last_message
+        })
+
+    active_id = request.args.get('conversacion', type=int)
+    active_conversation = None
+    history = []
+    if active_id is not None:
+        active_conversation = next(
+            (item['conversacion'] for item in conversations if item['conversacion'].id == active_id),
+            None
+        )
+        if active_conversation is None:
+            abort(404)
+        history = Mensaje.query.filter_by(
+            conversacion_id=active_conversation.id
+        ).order_by(Mensaje.fecha_creacion, Mensaje.id).all()
+
     return render_template(
-        'producto_detalle.html',
-        producto=producto,
-        chat_disponible='iniciar_conversacion' in app.view_functions
+        'mensajes.html',
+        conversaciones=conversations,
+        conversacion_activa=active_conversation,
+        historial=history,
+        usuario_id=current_user.id
     )
+
+
+@app.route('/mensajes/<int:conversation_id>/enviar', methods=['POST'])
+@login_required
+def enviar_mensaje(conversation_id):
+    validate_admin_csrf()
+    conversation = Conversacion.query.get_or_404(conversation_id)
+    if current_user.id not in (conversation.comprador_id, conversation.vendedor_id):
+        abort(403)
+
+    content = request.form.get('contenido', '').strip()
+    if not content:
+        flash('El mensaje no puede estar vacío.', 'warning')
+    elif len(content) > 2000:
+        flash('El mensaje no puede superar los 2000 caracteres.', 'warning')
+    else:
+        db.session.add(Mensaje(
+            conversacion_id=conversation.id,
+            remitente_id=current_user.id,
+            contenido=content
+        ))
+        conversation.fecha_actualizacion = datetime.now()
+        db.session.commit()
+        flash('Mensaje enviado.', 'success')
+    return redirect(url_for('mensajes', conversacion=conversation.id))
 
 @app.route('/producto/<int:producto_id>/quitar_venta', methods=['POST'])
 @login_required
@@ -1163,6 +1336,14 @@ def quitar_venta(producto_id):
         abort(403)
 
     nombre_producto = producto.nombre
+    Conversacion.query.filter_by(producto_id=producto.id).update(
+        {Conversacion.producto_id: None},
+        synchronize_session=False
+    )
+    Conversacion.query.filter_by(producto_id=producto.id).update(
+        {Conversacion.producto_id: None},
+        synchronize_session=False
+    )
     db.session.delete(producto)
     db.session.commit()
 

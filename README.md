@@ -67,7 +67,7 @@ Esta URL permite que cualquiera que la conozca acceda a la aplicación desde Int
 
 Compose conserva los datos de PostgreSQL y las imágenes subidas en los volúmenes `postgres_data` y `uploads`. Configura y prueba copias de seguridad de esos volúmenes antes de abrir la beta. No elimines los volúmenes al actualizar o recrear el recurso.
 
-El contenedor requiere `SECRET_KEY` y PostgreSQL al ejecutarse en producción; no arrancará con secretos por defecto ni con SQLite efímero. Mantiene un worker Gunicorn con 100 threads para soportar las conexiones de chat en tiempo real. El actual actualizador de noticias corre dentro del proceso web: no escales réplicas de `app` sin antes separar ese scheduler para evitar ejecuciones duplicadas.
+El contenedor requiere `SECRET_KEY` y PostgreSQL al ejecutarse en producción; no arrancará con secretos por defecto ni con SQLite efímero. Mantiene un worker Gunicorn con 100 threads para atender las solicitudes de la aplicación. El actual actualizador de noticias corre dentro del proceso web: no escales réplicas de `app` sin antes separar ese scheduler para evitar ejecuciones duplicadas.
 
 Este despliegue crea una base nueva y **no importa automáticamente** usuarios, publicaciones ni imágenes de una instalación local. Antes de abrir la beta, decide si quieres iniciar con datos vacíos o preparar una migración de `yamitas.db` y `static/uploads`.
 
@@ -86,6 +86,10 @@ Luego inicia sesión y abre `/admin`. Allí puedes buscar usuarios, consultar su
 Configura un `SECRET_KEY` secreto y estable en el servidor. Si no está definido, la aplicación genera uno al iniciar y las sesiones se invalidan cuando se reinicia.
 
 Al iniciar la aplicación se agregan automáticamente a la tabla de usuarios los campos de rol y estado necesarios, conservando las cuentas existentes como usuarios activos sin privilegios administrativos.
+
+## Consultas sobre animales en venta
+
+Un comprador con sesión iniciada puede enviar una consulta desde el detalle de una publicación. El dueño responde desde `/mensajes`; la conversación y sus mensajes quedan guardados en la base de datos. Para ver respuestas nuevas, vuelve a abrir o actualizar la conversación.
 
 ## Despliegue en Vercel
 
