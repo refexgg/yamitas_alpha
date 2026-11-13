@@ -79,7 +79,7 @@ Este proyecto está preparado para desplegar la aplicación Flask completa en Ve
 ### Configuración incluida
 
 - `vercel.json` apunta al handler en `api/index.py`.
-- `runtime.txt` y `.python-version` definen Python 3.11.4.
+- `runtime.txt` y `.python-version` definen Python 3.12.4.
 - `package.json` ya no contiene un script `build` para evitar que Vercel intente ejecutar un build de Node.
 
 ### Notas de despliegue
