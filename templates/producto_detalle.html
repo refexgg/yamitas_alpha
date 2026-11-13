@@ -83,11 +83,15 @@
                                     <a href="{{ url_for('reproductores') }}" class="btn btn-secondary">Volver</a>
                                     <a href="{{ url_for('perfil') }}" class="btn btn-primary">Ver perfil del publicador</a>
                                     {% if current_user.is_authenticated and current_user.id != producto.usuario_id %}
-                                        <form method="POST" action="{{ url_for('iniciar_conversacion', producto_id=producto.id) }}" class="d-inline">
-                                            <button type="submit" class="btn btn-success">
-                                                <i class="fas fa-comments me-1"></i>Consultar al vendedor
-                                            </button>
-                                        </form>
+                                        {% if chat_disponible %}
+                                            <form method="POST" action="{{ url_for('iniciar_conversacion', producto_id=producto.id) }}" class="d-inline">
+                                                <button type="submit" class="btn btn-success">
+                                                    <i class="fas fa-comments me-1"></i>Consultar al vendedor
+                                                </button>
+                                            </form>
+                                        {% else %}
+                                            <span class="text-muted align-self-center">La consulta al vendedor no está disponible por el momento.</span>
+                                        {% endif %}
                                     {% elif not current_user.is_authenticated %}
                                         <a href="{{ url_for('login', next=request.path) }}" class="btn btn-success">
                                             <i class="fas fa-comments me-1"></i>Inicia sesión para consultar

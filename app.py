@@ -1149,7 +1149,11 @@ def reproductores():
 @app.route('/producto/<int:producto_id>')
 def detalle_producto(producto_id):
     producto = Producto.query.get_or_404(producto_id)
-    return render_template('producto_detalle.html', producto=producto)
+    return render_template(
+        'producto_detalle.html',
+        producto=producto,
+        chat_disponible='iniciar_conversacion' in app.view_functions
+    )
 
 @app.route('/producto/<int:producto_id>/quitar_venta', methods=['POST'])
 @login_required
