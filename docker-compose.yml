@@ -30,6 +30,14 @@ services:
       retries: 3
       start_period: 90s
 
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    command: tunnel --no-autoupdate --url http://app:8000
+
   db:
     image: postgres:16-alpine
     restart: unless-stopped

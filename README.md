@@ -59,6 +59,12 @@ El despliegue de Coolify ejecuta el sitio Flask completo: las páginas web y el 
 3. Configura el dominio HTTPS de Coolify para el servicio `app`, puerto `8000`, y despliega. No publiques el servicio `db`: la aplicación se conecta a PostgreSQL por la red privada de Compose.
 4. Comprueba que `https://tu-dominio/healthz` responda `{"status":"ok"}`. El endpoint también verifica la conexión a la base de datos.
 
+### Acceso temporal sin dominio propio
+
+El servicio `tunnel` de Compose abre un Cloudflare Quick Tunnel hacia `app:8000`. Después del despliegue, consulta los logs del servicio `tunnel` en Coolify y busca la URL `https://...trycloudflare.com`. La URL es aleatoria y puede cambiar si el túnel se reinicia. No requiere abrir puertos en el router ni configurar DNS.
+
+Esta URL permite que cualquiera que la conozca acceda a la aplicación desde Internet; no la compartas si no quieres hacerla pública. Quick Tunnels son para pruebas y no ofrecen un nombre estable. Para producción, configura un dominio propio y un túnel con nombre, o elimina el servicio `tunnel` de Compose si no necesitas acceso público.
+
 Compose conserva los datos de PostgreSQL y las imágenes subidas en los volúmenes `postgres_data` y `uploads`. Configura y prueba copias de seguridad de esos volúmenes antes de abrir la beta. No elimines los volúmenes al actualizar o recrear el recurso.
 
 El contenedor requiere `SECRET_KEY` y PostgreSQL al ejecutarse en producción; no arrancará con secretos por defecto ni con SQLite efímero. Mantiene un worker Gunicorn y cuatro threads, adecuado como punto de partida para una beta pequeña. El actual actualizador de noticias corre dentro del proceso web: no escales réplicas de `app` sin antes separar ese scheduler para evitar ejecuciones duplicadas.
