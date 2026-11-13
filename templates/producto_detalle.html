@@ -81,7 +81,7 @@
 
                                 <div class="d-flex gap-2 mt-4 flex-wrap">
                                     <a href="{{ url_for('reproductores') }}" class="btn btn-secondary">Volver</a>
-                                    <a href="{{ url_for('perfil') }}" class="btn btn-primary">Ver perfil del publicador</a>
+                                    <a href="{{ url_for('perfil_publico', user_id=producto.usuario_id) }}" class="btn btn-primary">Ver perfil del publicador</a>
                                     {% if current_user.is_authenticated and current_user.id != producto.usuario_id %}
                                         <form method="POST" action="{{ url_for('iniciar_conversacion', producto_id=producto.id) }}" class="w-100 mt-2">
                                             <input type="hidden" name="csrf_token" value="{{ admin_csrf_token() }}">

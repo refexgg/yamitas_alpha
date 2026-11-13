@@ -501,8 +501,9 @@ def registro():
         db.session.add(nuevo_usuario)
         db.session.commit()
 
-        flash('Registro exitoso. Ya puedes iniciar sesión.', 'success')
-        return redirect(url_for('login'))
+        login_user(nuevo_usuario, remember=True)
+        flash('Tu cuenta fue creada correctamente. ¡Bienvenido!', 'success')
+        return redirect(url_for('index'))
     
     return render_template('registro.html')
 
@@ -516,16 +517,6 @@ def login():
         if usuario and usuario.is_active and check_password_hash(usuario.password, password):
             login_user(usuario, remember=True)
             flash('Has iniciado sesión correctamente.', 'success')
-            next_url = request.args.get('next', '')
-            parsed_next_url = urlparse(next_url)
-            if (
-                next_url.startswith('/')
-                and not next_url.startswith('//')
-                and not parsed_next_url.scheme
-                and not parsed_next_url.netloc
-                and '\\' not in next_url
-            ):
-                return redirect(next_url)
             return redirect(url_for('index'))
 
         if usuario and not usuario.is_active:
@@ -541,6 +532,13 @@ def login():
 @login_required
 def perfil():
     return render_template('perfil.html')
+
+
+@app.route('/perfil/<int:user_id>')
+def perfil_publico(user_id):
+    usuario = User.query.get_or_404(user_id)
+    return render_template('perfil_publico.html', usuario=usuario)
+
 
 @app.route('/editar-ubicacion', methods=['POST'])
 @login_required

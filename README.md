@@ -91,6 +91,8 @@ Al iniciar la aplicación se agregan automáticamente a la tabla de usuarios los
 
 Un comprador con sesión iniciada puede enviar una consulta desde el detalle de una publicación. El dueño responde desde `/mensajes`; la conversación y sus mensajes quedan guardados en la base de datos y se muestran en tiempo real cuando ambos tienen abierta esa conversación. Si Socket.IO no logra conectarse, el formulario sigue funcionando con recarga normal. No se envían notificaciones cuando el usuario no tiene el chat abierto.
 
+Desde el detalle de una publicación, el enlace al perfil del publicador abre su perfil público con nombre y ubicación, si la tiene configurada.
+
 ## Despliegue en Vercel
 
 Este proyecto está preparado para desplegar la aplicación Flask completa en Vercel usando una función Python.
