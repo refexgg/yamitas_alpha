@@ -3,7 +3,9 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from sqlalchemy import inspect, text, or_
+from sqlalchemy import inspect, text, or_, UniqueConstraint
+from sqlalchemy.exc import IntegrityError
+from flask_socketio import SocketIO, emit, join_room
 import os
 import time
 import base64
@@ -100,6 +102,7 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Necesitas iniciar sesión para acceder a esta página.'
 login_manager.login_message_category = 'warning'
+socketio = SocketIO(app, async_mode='threading')
 
 @app.route('/healthz')
 def healthz():
@@ -116,6 +119,7 @@ def inject_active_page():
         'publicar': 'publicar',
         'perfil': 'perfil',
         'registro_animales': 'registro_animales',
+        'mensajes': 'mensajes',
     }
     return {'active_page': page_map.get(endpoint, '')}
 
@@ -147,6 +151,41 @@ class Producto(db.Model):
     usuario_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     usuario = db.relationship('User', backref=db.backref('productos', lazy=True))
     fecha_creacion = db.Column(db.DateTime, default=db.func.current_timestamp())
+
+
+class Conversacion(db.Model):
+    __table_args__ = (
+        UniqueConstraint('producto_id', 'comprador_id', 'vendedor_id', name='uq_conversacion_participantes_producto'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    producto_id = db.Column(db.Integer, db.ForeignKey('producto.id', ondelete='SET NULL'), nullable=True)
+    producto_nombre = db.Column(db.String(100), nullable=False)
+    comprador_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    vendedor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    fecha_creacion = db.Column(db.DateTime, default=db.func.current_timestamp(), nullable=False)
+    fecha_actualizacion = db.Column(
+        db.DateTime,
+        default=db.func.current_timestamp(),
+        onupdate=db.func.current_timestamp(),
+        nullable=False
+    )
+
+    producto = db.relationship('Producto', backref=db.backref('conversaciones', lazy=True))
+    comprador = db.relationship('User', foreign_keys=[comprador_id])
+    vendedor = db.relationship('User', foreign_keys=[vendedor_id])
+
+
+class Mensaje(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    conversacion_id = db.Column(db.Integer, db.ForeignKey('conversacion.id'), nullable=False, index=True)
+    remitente_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    contenido = db.Column(db.String(2000), nullable=False)
+    fecha_creacion = db.Column(db.DateTime, default=db.func.current_timestamp(), nullable=False)
+
+    conversacion = db.relationship('Conversacion', backref=db.backref('mensajes', lazy=True))
+    remitente = db.relationship('User')
+
 
 class Evento(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -444,6 +483,16 @@ def login():
         if usuario and check_password_hash(usuario.password, password):
             login_user(usuario, remember=True)
             flash('Has iniciado sesión correctamente.', 'success')
+            next_url = request.args.get('next', '')
+            parsed_next_url = urlparse(next_url)
+            if (
+                next_url.startswith('/')
+                and not next_url.startswith('//')
+                and '\\' not in next_url
+                and not parsed_next_url.scheme
+                and not parsed_next_url.netloc
+            ):
+                return redirect(next_url)
             return redirect(url_for('index'))
 
         flash('Usuario o contraseña inválidos.', 'danger')
@@ -943,6 +992,173 @@ def reproductores():
 def detalle_producto(producto_id):
     producto = Producto.query.get_or_404(producto_id)
     return render_template('producto_detalle.html', producto=producto)
+
+
+@app.route('/producto/<int:producto_id>/conversacion', methods=['POST'])
+@login_required
+def iniciar_conversacion(producto_id):
+    producto = Producto.query.get_or_404(producto_id)
+    if producto.usuario_id == current_user.id:
+        flash('No puedes iniciar una conversación contigo mismo.', 'warning')
+        return redirect(url_for('detalle_producto', producto_id=producto.id))
+
+    conversacion = Conversacion.query.filter_by(
+        producto_id=producto.id,
+        comprador_id=current_user.id,
+        vendedor_id=producto.usuario_id
+    ).first()
+    if not conversacion:
+        conversacion = Conversacion(
+            producto_id=producto.id,
+            producto_nombre=producto.nombre,
+            comprador_id=current_user.id,
+            vendedor_id=producto.usuario_id
+        )
+        db.session.add(conversacion)
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            conversacion = Conversacion.query.filter_by(
+                producto_id=producto.id,
+                comprador_id=current_user.id,
+                vendedor_id=producto.usuario_id
+            ).first()
+            if not conversacion:
+                raise
+
+    return redirect(url_for('mensajes', conversacion=conversacion.id))
+
+
+@app.route('/mensajes')
+@login_required
+def mensajes():
+    conversaciones = Conversacion.query.filter(
+        or_(
+            Conversacion.comprador_id == current_user.id,
+            Conversacion.vendedor_id == current_user.id
+        )
+    ).order_by(Conversacion.fecha_actualizacion.desc(), Conversacion.id.desc()).all()
+
+    conversation_id = request.args.get('conversacion', type=int)
+    conversacion_activa = None
+    historial = []
+    if conversation_id is not None:
+        conversacion_activa = Conversacion.query.filter(
+            Conversacion.id == conversation_id,
+            or_(
+                Conversacion.comprador_id == current_user.id,
+                Conversacion.vendedor_id == current_user.id
+            )
+        ).first_or_404()
+        historial = Mensaje.query.filter_by(conversacion_id=conversacion_activa.id) \
+            .order_by(Mensaje.fecha_creacion.desc(), Mensaje.id.desc()).limit(100).all()
+        historial.reverse()
+
+    items_conversacion = []
+    for conversacion in conversaciones:
+        contacto = (
+            conversacion.vendedor
+            if conversacion.comprador_id == current_user.id
+            else conversacion.comprador
+        )
+        ultimo_mensaje = Mensaje.query.filter_by(conversacion_id=conversacion.id) \
+            .order_by(Mensaje.fecha_creacion.desc(), Mensaje.id.desc()).first()
+        items_conversacion.append({
+            'conversacion': conversacion,
+            'contacto': contacto,
+            'ultimo_mensaje': ultimo_mensaje
+        })
+
+    return render_template(
+        'mensajes.html',
+        conversaciones=items_conversacion,
+        conversacion_activa=conversacion_activa,
+        historial=historial,
+        usuario_id=current_user.id
+    )
+
+
+def _conversacion_de_usuario(conversation_id):
+    if not current_user.is_authenticated or not isinstance(conversation_id, int):
+        return None
+    return Conversacion.query.filter(
+        Conversacion.id == conversation_id,
+        or_(
+            Conversacion.comprador_id == current_user.id,
+            Conversacion.vendedor_id == current_user.id
+        )
+    ).first()
+
+
+@socketio.on('connect')
+def handle_chat_connect(auth=None):
+    if not current_user.is_authenticated:
+        return False
+
+
+@socketio.on('join_conversation')
+def handle_join_conversation(data):
+    conversation_id = data.get('conversation_id') if isinstance(data, dict) else None
+    if not isinstance(conversation_id, int):
+        return {'ok': False, 'error': 'Conversación inválida.'}
+    conversacion = _conversacion_de_usuario(conversation_id)
+    if not conversacion:
+        return {'ok': False, 'error': 'No tienes acceso a esta conversación.'}
+    join_room(f'conversacion_{conversacion.id}')
+    return {'ok': True}
+
+
+@socketio.on('send_message')
+def handle_send_message(data):
+    if not isinstance(data, dict):
+        return {'ok': False, 'error': 'Mensaje inválido.'}
+    conversation_id = data.get('conversation_id')
+    contenido = data.get('content')
+    if not isinstance(conversation_id, int) or not isinstance(contenido, str):
+        return {'ok': False, 'error': 'Mensaje inválido.'}
+    contenido = contenido.strip()
+    if not contenido:
+        return {'ok': False, 'error': 'Escribe un mensaje antes de enviarlo.'}
+    if len(contenido) > 2000:
+        return {'ok': False, 'error': 'El mensaje no puede superar los 2000 caracteres.'}
+
+    conversacion = _conversacion_de_usuario(conversation_id)
+    if not conversacion:
+        return {'ok': False, 'error': 'No tienes acceso a esta conversación.'}
+
+    mensaje = Mensaje(
+        conversacion_id=conversacion.id,
+        remitente_id=current_user.id,
+        contenido=contenido
+    )
+    conversacion.fecha_actualizacion = datetime.utcnow()
+    db.session.add(mensaje)
+    db.session.commit()
+
+    emit('new_message', {
+        'id': mensaje.id,
+        'sender_id': current_user.id,
+        'sender_name': current_user.username,
+        'content': mensaje.contenido,
+        'created_at': mensaje.fecha_creacion.isoformat()
+    }, to=f'conversacion_{conversacion.id}')
+    return {'ok': True}
+
+
+@socketio.on('typing')
+def handle_typing(data):
+    if not isinstance(data, dict) or not isinstance(data.get('conversation_id'), int):
+        return
+    conversacion = _conversacion_de_usuario(data['conversation_id'])
+    if not conversacion:
+        return
+    emit('typing', {
+        'user_id': current_user.id,
+        'username': current_user.username,
+        'is_typing': bool(data.get('is_typing'))
+    }, to=f'conversacion_{conversacion.id}', include_self=False)
+
 
 @app.route('/producto/<int:producto_id>/quitar_venta', methods=['POST'])
 @login_required
@@ -1832,7 +2048,8 @@ if SCHEDULER_ENABLED:
     scheduler.start()
 
 if __name__ == '__main__':
-    app.run(
+    socketio.run(
+        app,
         host='0.0.0.0',
         port=int(os.environ.get('PORT', 5000)),
         debug=os.environ.get('FLASK_DEBUG', 'False').lower() in ('1', 'true', 'yes')

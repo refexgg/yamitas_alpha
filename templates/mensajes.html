@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mensajes - Yamitas</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=chat-1">
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+    <meta name="theme-color" content="#8B6F47">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/app-icon-192.png') }}">
+</head>
+<body class="bg-light">
+<header class="navbar-custom">
+    <div class="container-fluid">
+        <div class="d-flex justify-content-between align-items-center py-3">
+            <a href="{{ url_for('index') }}" class="text-decoration-none d-flex align-items-center">
+                <i class="fas fa-arrow-left text-dark me-2"></i>
+                <h1 class="h4 mb-0">Mensajes</h1>
+            </a>
+            <a href="{{ url_for('perfil') }}" class="btn btn-outline-primary btn-sm">Perfil</a>
+        </div>
+    </div>
+</header>
+
+<main class="container py-4">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Cerrar"></button>
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <div class="messaging-layout">
+        <aside class="conversation-list card shadow-sm">
+            <div class="card-header bg-white py-3">
+                <h2 class="h6 mb-0"><i class="fas fa-inbox me-2"></i>Tus conversaciones</h2>
+            </div>
+            <div class="conversation-list-items">
+                {% for item in conversaciones %}
+                    {% set conversacion = item.conversacion %}
+                    <a class="conversation-link {% if conversacion_activa and conversacion_activa.id == conversacion.id %}active{% endif %}"
+                       href="{{ url_for('mensajes', conversacion=conversacion.id) }}">
+                        <div class="d-flex justify-content-between gap-2">
+                            <strong class="text-truncate">{{ item.contacto.username }}</strong>
+                            {% if item.ultimo_mensaje %}
+                                <small class="text-muted flex-shrink-0">{{ item.ultimo_mensaje.fecha_creacion.strftime('%d/%m') }}</small>
+                            {% endif %}
+                        </div>
+                        <div class="small text-muted text-truncate">{{ conversacion.producto_nombre }}</div>
+                        <div class="small text-muted text-truncate">
+                            {{ item.ultimo_mensaje.contenido if item.ultimo_mensaje else 'Inicia la conversación' }}
+                        </div>
+                    </a>
+                {% else %}
+                    <p class="text-muted small p-3 mb-0">Todavía no tienes conversaciones. Puedes escribirle a un vendedor desde la publicación de un animal.</p>
+                {% endfor %}
+            </div>
+        </aside>
+
+        <section class="conversation-panel card shadow-sm"
+                 {% if conversacion_activa %}data-conversation-id="{{ conversacion_activa.id }}"{% endif %}>
+            {% if conversacion_activa %}
+                {% set contacto = conversacion_activa.vendedor if conversacion_activa.comprador_id == usuario_id else conversacion_activa.comprador %}
+                <div class="conversation-header card-header bg-white">
+                    <div class="d-flex justify-content-between align-items-center gap-3">
+                        <div class="min-w-0">
+                            <h2 class="h6 mb-1 text-truncate">{{ contacto.username }}</h2>
+                            <a class="small text-muted text-decoration-none" href="{{ url_for('detalle_producto', producto_id=conversacion_activa.producto_id) if conversacion_activa.producto_id else '#' }}">
+                                {{ conversacion_activa.producto_nombre }}
+                            </a>
+                        </div>
+                        <span id="connection-status" class="small text-muted flex-shrink-0" role="status">Conectando…</span>
+                    </div>
+                </div>
+                <div id="message-history" class="message-history" aria-live="polite" aria-label="Mensajes de la conversación">
+                    {% for mensaje in historial %}
+                        <div class="message-row {% if mensaje.remitente_id == usuario_id %}message-row-own{% endif %}" data-message-id="{{ mensaje.id }}">
+                            <div class="message-bubble {% if mensaje.remitente_id == usuario_id %}message-bubble-own{% endif %}">
+                                {% if mensaje.remitente_id != usuario_id %}
+                                    <strong class="message-sender">{{ mensaje.remitente.username }}</strong>
+                                {% endif %}
+                                <p class="message-content mb-1">{{ mensaje.contenido }}</p>
+                                <time class="message-time">{{ mensaje.fecha_creacion.strftime('%d/%m/%Y %H:%M') }}</time>
+                            </div>
+                        </div>
+                    {% else %}
+                        <div id="empty-history" class="empty-history text-muted">
+                            <i class="far fa-comments"></i>
+                            <p class="mb-0">Saluda y comienza la conversación.</p>
+                        </div>
+                    {% endfor %}
+                </div>
+                <div id="typing-indicator" class="typing-indicator text-muted small" aria-live="polite"></div>
+                <div class="conversation-composer">
+                    <div id="send-error" class="small text-danger mb-2" role="alert"></div>
+                    <form id="message-form" class="d-flex align-items-end gap-2">
+                        <label for="message-input" class="visually-hidden">Escribe tu mensaje</label>
+                        <textarea id="message-input" class="form-control" rows="1" maxlength="2000"
+                                  placeholder="Escribe un mensaje… (Enter para enviar)" required></textarea>
+                        <button id="send-button" type="submit" class="btn btn-success" aria-label="Enviar mensaje">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </form>
+                    <div class="small text-muted mt-1">Máximo 2000 caracteres. Shift + Enter para un nuevo renglón.</div>
+                </div>
+            {% else %}
+                <div class="conversation-placeholder text-center text-muted">
+                    <i class="far fa-comments"></i>
+                    <h2 class="h5 mt-3">Tus conversaciones, en un solo lugar</h2>
+                    <p class="mb-0">Selecciona un chat o consulta al vendedor desde la publicación de un animal.</p>
+                </div>
+            {% endif %}
+        </section>
+    </div>
+</main>
+
+{% include "_footer.html" %}
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+{% if conversacion_activa %}
+    <script>window.yamitasUserId = {{ usuario_id|tojson }};</script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='js/mensajes.js') }}?v=chat-1" defer></script>
+{% endif %}
+<script src="{{ url_for('static', filename='js/pwa.js') }}"></script>
+</body>
+</html>

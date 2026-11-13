@@ -41,7 +41,7 @@ Aplicación Flask para la gestión de animales, ferias, publicaciones y noticias
    ```bash
    python app.py
    ```
-5. Abre `http://127.0.0.1:5000` en tu navegador.
+5. Abre `http://127.0.0.1:5000` en tu navegador. El servidor de desarrollo también habilita los chats en tiempo real.
 
 ## Despliegue en Coolify
 
@@ -67,7 +67,7 @@ Esta URL permite que cualquiera que la conozca acceda a la aplicación desde Int
 
 Compose conserva los datos de PostgreSQL y las imágenes subidas en los volúmenes `postgres_data` y `uploads`. Configura y prueba copias de seguridad de esos volúmenes antes de abrir la beta. No elimines los volúmenes al actualizar o recrear el recurso.
 
-El contenedor requiere `SECRET_KEY` y PostgreSQL al ejecutarse en producción; no arrancará con secretos por defecto ni con SQLite efímero. Mantiene un worker Gunicorn y cuatro threads, adecuado como punto de partida para una beta pequeña. El actual actualizador de noticias corre dentro del proceso web: no escales réplicas de `app` sin antes separar ese scheduler para evitar ejecuciones duplicadas.
+El contenedor requiere `SECRET_KEY` y PostgreSQL al ejecutarse en producción; no arrancará con secretos por defecto ni con SQLite efímero. Mantiene un worker Gunicorn con 100 threads para soportar las conexiones de chat en tiempo real. El actual actualizador de noticias corre dentro del proceso web: no escales réplicas de `app` sin antes separar ese scheduler para evitar ejecuciones duplicadas.
 
 Este despliegue crea una base nueva y **no importa automáticamente** usuarios, publicaciones ni imágenes de una instalación local. Antes de abrir la beta, decide si quieres iniciar con datos vacíos o preparar una migración de `yamitas.db` y `static/uploads`.
 

@@ -82,6 +82,17 @@
                                 <div class="d-flex gap-2 mt-4 flex-wrap">
                                     <a href="{{ url_for('reproductores') }}" class="btn btn-secondary">Volver</a>
                                     <a href="{{ url_for('perfil') }}" class="btn btn-primary">Ver perfil del publicador</a>
+                                    {% if current_user.is_authenticated and current_user.id != producto.usuario_id %}
+                                        <form method="POST" action="{{ url_for('iniciar_conversacion', producto_id=producto.id) }}" class="d-inline">
+                                            <button type="submit" class="btn btn-success">
+                                                <i class="fas fa-comments me-1"></i>Consultar al vendedor
+                                            </button>
+                                        </form>
+                                    {% elif not current_user.is_authenticated %}
+                                        <a href="{{ url_for('login', next=request.path) }}" class="btn btn-success">
+                                            <i class="fas fa-comments me-1"></i>Inicia sesión para consultar
+                                        </a>
+                                    {% endif %}
                                     {% if current_user.is_authenticated and current_user.id == producto.usuario_id %}
                                         <a href="{{ url_for('editar_producto', producto_id=producto.id) }}" class="btn btn-warning">Editar publicación</a>
                                         <form method="POST" action="{{ url_for('quitar_venta', producto_id=producto.id) }}" class="d-inline" onsubmit="return confirm('¿Quitar este animal de la venta?');">
