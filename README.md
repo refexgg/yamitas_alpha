@@ -71,6 +71,22 @@ El contenedor requiere `SECRET_KEY` y PostgreSQL al ejecutarse en producción; n
 
 Este despliegue crea una base nueva y **no importa automáticamente** usuarios, publicaciones ni imágenes de una instalación local. Antes de abrir la beta, decide si quieres iniciar con datos vacíos o preparar una migración de `yamitas.db` y `static/uploads`.
 
+## Panel de administración
+
+Las cuentas nuevas no pueden asignarse permiqsos administrativos desde el registro. Primero registra una cuenta propia y, desde el servidor que usa la base de datos de producción, promuévela manualmente:
+
+```bash
+flask --app app promover-admin tu-correo@dominio.com
+```
+
+En Coolify, ejecuta el comando desde la consola del servicio `app`. Con Docker Compose local, ejecuta `docker compose exec app flask --app app promover-admin tu-correo@dominio.com`. El email debe pertenecer a una cuenta ya registrada. No concedas este rol a cuentas ajenas.
+
+Luego inicia sesión y abre `/admin`. Allí puedes buscar usuarios, consultar sus datos básicos, suspender/reactivar cuentas y eliminarlas; en `/admin/contenido` puedes moderar animales, publicaciones y ferias/eventos. Las suspensiones impiden iniciar sesión y cierran una sesión existente en su siguiente solicitud. Eliminar una cuenta es permanente y elimina también sus animales, publicaciones y fuentes de noticias; las ferias/eventos no pertenecen a una cuenta. Haz una copia de seguridad antes de borrar datos.
+
+Configura un `SECRET_KEY` secreto y estable en el servidor. Si no está definido, la aplicación genera uno al iniciar y las sesiones se invalidan cuando se reinicia.
+
+Al iniciar la aplicación se agregan automáticamente a la tabla de usuarios los campos de rol y estado necesarios, conservando las cuentas existentes como usuarios activos sin privilegios administrativos.
+
 ## Despliegue en Vercel
 
 Este proyecto está preparado para desplegar la aplicación Flask completa en Vercel usando una función Python.

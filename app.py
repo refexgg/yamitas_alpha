@@ -1,12 +1,15 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, abort
+from flask import Flask, render_template, request, redirect, url_for, flash, abort, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from sqlalchemy import inspect, text, or_, UniqueConstraint
-from sqlalchemy.exc import IntegrityError
-from flask_socketio import SocketIO, emit, join_room
+from sqlalchemy import inspect, text, or_
+from sqlalchemy.exc import SQLAlchemyError
 import os
+import click
+import hmac
+import secrets
+from functools import wraps
 import time
 import base64
 import io
@@ -25,11 +28,7 @@ import re
 import markdown
 
 app = Flask(__name__)
-APP_ENV = os.environ.get('APP_ENV', 'development').lower()
-secret_key = os.environ.get('SECRET_KEY')
-if APP_ENV == 'production' and not secret_key:
-    raise RuntimeError('SECRET_KEY must be configured in production.')
-app.config['SECRET_KEY'] = secret_key or 'tu_clave_secreta_aqui'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
 
 
 def is_vercel_deployment():
@@ -40,13 +39,8 @@ def is_vercel_deployment():
     )
 
 VERCEL_DEPLOY = is_vercel_deployment()
-SCHEDULER_ENABLED = os.environ.get(
-    'ENABLE_SCHEDULER', str(not VERCEL_DEPLOY)
-).lower() in ('1', 'true', 'yes')
 
 database_url = os.environ.get('DATABASE_URL')
-if APP_ENV == 'production' and not database_url:
-    raise RuntimeError('DATABASE_URL must be configured in production.')
 if not database_url:
     if VERCEL_DEPLOY:
         database_url = 'sqlite:////tmp/yamitas.db'
@@ -60,17 +54,11 @@ if not database_url:
         except Exception:
             database_url = 'sqlite:////tmp/yamitas.db'
 
-if APP_ENV == 'production' and database_url.startswith('sqlite:'):
-    raise RuntimeError('A persistent PostgreSQL DATABASE_URL is required in production.')
-
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['REMEMBER_COOKIE_DURATION'] = int(os.environ.get('REMEMBER_COOKIE_DURATION', 86400 * 30))  # 30 días
 app.config['REMEMBER_COOKIE_SECURE'] = os.environ.get('REMEMBER_COOKIE_SECURE', 'False').lower() in ('1', 'true', 'yes')
 app.config['REMEMBER_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() in ('1', 'true', 'yes')
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 default_upload_folder = os.path.join(app.root_path, 'static', 'uploads')
 if VERCEL_DEPLOY:
     default_upload_folder = '/tmp/uploads'
@@ -82,8 +70,6 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 try:
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 except OSError:
-    if APP_ENV == 'production':
-        raise
     # Fallback to a writeable temp directory on serverless platforms
     fallback_upload_folder = os.path.join('/tmp', 'uploads')
     try:
@@ -102,12 +88,6 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Necesitas iniciar sesión para acceder a esta página.'
 login_manager.login_message_category = 'warning'
-socketio = SocketIO(app, async_mode='threading')
-
-@app.route('/healthz')
-def healthz():
-    db.session.execute(text('SELECT 1'))
-    return {'status': 'ok'}
 
 
 @app.context_processor
@@ -119,9 +99,46 @@ def inject_active_page():
         'publicar': 'publicar',
         'perfil': 'perfil',
         'registro_animales': 'registro_animales',
-        'mensajes': 'mensajes',
+        'admin': 'admin',
+        'admin_content': 'admin',
     }
-    return {'active_page': page_map.get(endpoint, '')}
+    return {
+        'active_page': page_map.get(endpoint, ''),
+        'admin_csrf_token': admin_csrf_token,
+    }
+
+
+def admin_csrf_token():
+    token = session.get('_admin_csrf_token')
+    if token is None:
+        token = secrets.token_urlsafe(32)
+        session['_admin_csrf_token'] = token
+    return token
+
+
+def admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapped_view(*args, **kwargs):
+        if not current_user.is_admin:
+            abort(403)
+        return view(*args, **kwargs)
+
+    return wrapped_view
+
+
+def validate_admin_csrf():
+    submitted_token = request.form.get('csrf_token', '')
+    stored_token = session.get('_admin_csrf_token', '')
+    if not stored_token or not hmac.compare_digest(submitted_token, stored_token):
+        abort(400, description='Token de seguridad inválido. Recarga la página e inténtalo nuevamente.')
+
+
+@app.before_request
+def end_suspended_user_session():
+    if current_user.is_authenticated and not current_user.is_active:
+        logout_user()
+        flash('Tu cuenta está suspendida. Contacta al administrador.', 'danger')
 
 # ==================== MODELOS ====================
 class User(UserMixin, db.Model):
@@ -132,6 +149,8 @@ class User(UserMixin, db.Model):
     tipo_usuario = db.Column(db.String(50), default='comprador')  # comprador, vendedor
     ubicacion = db.Column(db.String(255), nullable=True)  # lugar de producción
     fecha_registro = db.Column(db.DateTime, default=db.func.current_timestamp())
+    is_admin = db.Column(db.Boolean, nullable=False, default=False, server_default=db.false())
+    is_active = db.Column(db.Boolean, nullable=False, default=True, server_default=db.true())
 
 class Producto(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -151,41 +170,6 @@ class Producto(db.Model):
     usuario_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     usuario = db.relationship('User', backref=db.backref('productos', lazy=True))
     fecha_creacion = db.Column(db.DateTime, default=db.func.current_timestamp())
-
-
-class Conversacion(db.Model):
-    __table_args__ = (
-        UniqueConstraint('producto_id', 'comprador_id', 'vendedor_id', name='uq_conversacion_participantes_producto'),
-    )
-
-    id = db.Column(db.Integer, primary_key=True)
-    producto_id = db.Column(db.Integer, db.ForeignKey('producto.id', ondelete='SET NULL'), nullable=True)
-    producto_nombre = db.Column(db.String(100), nullable=False)
-    comprador_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    vendedor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    fecha_creacion = db.Column(db.DateTime, default=db.func.current_timestamp(), nullable=False)
-    fecha_actualizacion = db.Column(
-        db.DateTime,
-        default=db.func.current_timestamp(),
-        onupdate=db.func.current_timestamp(),
-        nullable=False
-    )
-
-    producto = db.relationship('Producto', backref=db.backref('conversaciones', lazy=True))
-    comprador = db.relationship('User', foreign_keys=[comprador_id])
-    vendedor = db.relationship('User', foreign_keys=[vendedor_id])
-
-
-class Mensaje(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    conversacion_id = db.Column(db.Integer, db.ForeignKey('conversacion.id'), nullable=False, index=True)
-    remitente_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    contenido = db.Column(db.String(2000), nullable=False)
-    fecha_creacion = db.Column(db.DateTime, default=db.func.current_timestamp(), nullable=False)
-
-    conversacion = db.relationship('Conversacion', backref=db.backref('mensajes', lazy=True))
-    remitente = db.relationship('User')
-
 
 class Evento(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -480,20 +464,14 @@ def login():
         password = request.form.get('password', '')
         usuario = User.query.filter_by(username=username).first()
 
-        if usuario and check_password_hash(usuario.password, password):
+        if usuario and usuario.is_active and check_password_hash(usuario.password, password):
             login_user(usuario, remember=True)
             flash('Has iniciado sesión correctamente.', 'success')
-            next_url = request.args.get('next', '')
-            parsed_next_url = urlparse(next_url)
-            if (
-                next_url.startswith('/')
-                and not next_url.startswith('//')
-                and '\\' not in next_url
-                and not parsed_next_url.scheme
-                and not parsed_next_url.netloc
-            ):
-                return redirect(next_url)
             return redirect(url_for('index'))
+
+        if usuario and not usuario.is_active:
+            flash('Tu cuenta está suspendida. Contacta al administrador.', 'danger')
+            return render_template('login.html', username=username)
 
         flash('Usuario o contraseña inválidos.', 'danger')
         return render_template('login.html', username=username)
@@ -741,12 +719,35 @@ def update_all_sources():
         # kept for compatibility, but these items are not shown in the main carousel.
 
 
+# create and start scheduler only when running as a long-lived server
+if not VERCEL_DEPLOY:
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=update_all_sources, trigger='interval', minutes=15, next_run_time=datetime.now())
+    scheduler.start()
+
 @app.route('/logout')
 @login_required
 def logout():
     logout_user()
     flash('Has cerrado sesión correctamente.', 'info')
     return redirect(url_for('index'))
+
+
+@app.cli.command('promover-admin')
+@click.argument('email')
+def promote_admin(email):
+    """Concede acceso de administrador a una cuenta existente."""
+    user = User.query.filter(db.func.lower(User.email) == email.strip().lower()).first()
+    if user is None:
+        raise click.ClickException('No existe una cuenta registrada con ese email.')
+    if user.is_admin:
+        click.echo(f'{user.email} ya tiene permisos de administrador.')
+        return
+
+    user.is_admin = True
+    db.session.commit()
+    click.echo(f'Permisos de administrador concedidos a {user.email}.')
+
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -788,13 +789,157 @@ def ensure_producto_columns():
     if 'usuario_id' not in existing:
         migrations.append("ALTER TABLE producto ADD COLUMN usuario_id INTEGER")
     if 'fecha_creacion' not in existing:
-        migrations.append("ALTER TABLE producto ADD COLUMN fecha_creacion TIMESTAMP")
+        migrations.append("ALTER TABLE producto ADD COLUMN fecha_creacion DATETIME")
 
     if migrations:
         with db.engine.connect() as conn:
             for statement in migrations:
                 conn.execute(text(statement))
             conn.commit()
+
+
+def ensure_user_columns():
+    inspector = inspect(db.engine)
+    if 'user' not in inspector.get_table_names():
+        return
+
+    existing = {column['name'] for column in inspector.get_columns('user')}
+    migrations = []
+    if 'is_admin' not in existing:
+        migrations.append('ALTER TABLE "user" ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE')
+    if 'is_active' not in existing:
+        migrations.append('ALTER TABLE "user" ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE')
+
+    if migrations:
+        with db.engine.begin() as conn:
+            for statement in migrations:
+                conn.execute(text(statement))
+
+
+@app.route('/admin')
+@admin_required
+def admin():
+    search = request.args.get('q', '').strip()[:100]
+    page = request.args.get('page', 1, type=int) or 1
+    users_query = User.query
+    if search:
+        pattern = f'%{search}%'
+        users_query = users_query.filter(or_(
+            User.username.ilike(pattern),
+            User.email.ilike(pattern)
+        ))
+
+    users = users_query.order_by(User.fecha_registro.desc(), User.id.desc()).paginate(
+        page=max(page, 1),
+        per_page=25,
+        error_out=False
+    )
+    return render_template(
+        'admin.html',
+        users=users,
+        search=search,
+        user_count=User.query.count(),
+        animal_count=Animal.query.count(),
+        publication_count=Producto.query.count(),
+        event_count=Evento.query.count()
+    )
+
+
+@app.route('/admin/usuarios/<int:user_id>/estado', methods=['POST'])
+@admin_required
+def admin_toggle_user(user_id):
+    validate_admin_csrf()
+    user = User.query.get_or_404(user_id)
+    if user.id == current_user.id:
+        flash('No puedes cambiar el estado de tu propia cuenta.', 'warning')
+    elif user.is_active and user.is_admin and User.query.filter_by(is_admin=True, is_active=True).count() <= 1:
+        flash('No puedes suspender al último administrador activo.', 'warning')
+    else:
+        user.is_active = not user.is_active
+        db.session.commit()
+        state = 'reactivada' if user.is_active else 'suspendida'
+        flash(f'La cuenta de {user.username} fue {state}.', 'success')
+    return redirect(url_for('admin'))
+
+
+@app.route('/admin/usuarios/<int:user_id>/eliminar', methods=['POST'])
+@admin_required
+def admin_delete_user(user_id):
+    validate_admin_csrf()
+    user = User.query.get_or_404(user_id)
+    if user.id == current_user.id:
+        flash('No puedes eliminar tu propia cuenta desde el panel.', 'warning')
+        return redirect(url_for('admin'))
+    if user.is_admin and user.is_active and User.query.filter_by(is_admin=True, is_active=True).count() <= 1:
+        flash('No puedes eliminar al último administrador activo.', 'warning')
+        return redirect(url_for('admin'))
+
+    username = user.username
+    try:
+        source_ids = [source.id for source in NewsSource.query.filter_by(usuario_id=user.id).all()]
+        if source_ids:
+            NewsItem.query.filter(NewsItem.source_id.in_(source_ids)).delete(synchronize_session=False)
+        NewsSource.query.filter_by(usuario_id=user.id).delete(synchronize_session=False)
+        Animal.query.filter_by(usuario_id=user.id).delete(synchronize_session=False)
+        Producto.query.filter_by(usuario_id=user.id).delete(synchronize_session=False)
+        db.session.delete(user)
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception('Error al eliminar la cuenta %s desde el panel', user_id)
+        flash('No se pudo eliminar la cuenta por un error de base de datos. Revisa los registros del servidor.', 'danger')
+        return redirect(url_for('admin'))
+
+    flash(f'La cuenta de {username} y sus datos asociados fueron eliminados.', 'success')
+    return redirect(request.referrer or url_for('admin'))
+
+
+@app.route('/admin/contenido')
+@admin_required
+def admin_content():
+    return render_template(
+        'admin_contenido.html',
+        animals=Animal.query.order_by(Animal.fecha_creacion.desc()).limit(100).all(),
+        publications=Producto.query.order_by(Producto.fecha_creacion.desc()).limit(100).all(),
+        events=Evento.query.order_by(Evento.fecha.desc()).limit(100).all()
+    )
+
+
+@app.route('/admin/animales/<int:animal_id>/eliminar', methods=['POST'])
+@admin_required
+def admin_delete_animal(animal_id):
+    validate_admin_csrf()
+    animal = Animal.query.get_or_404(animal_id)
+    name = animal.nombre
+    db.session.delete(animal)
+    db.session.commit()
+    flash(f'El animal "{name}" fue eliminado.', 'success')
+    return redirect(url_for('admin_content'))
+
+
+@app.route('/admin/publicaciones/<int:publication_id>/eliminar', methods=['POST'])
+@admin_required
+def admin_delete_publication(publication_id):
+    validate_admin_csrf()
+    publication = Producto.query.get_or_404(publication_id)
+    name = publication.nombre
+    db.session.delete(publication)
+    db.session.commit()
+    flash(f'La publicación "{name}" fue eliminada.', 'success')
+    return redirect(url_for('admin_content'))
+
+
+@app.route('/admin/ferias/<int:event_id>/eliminar', methods=['POST'])
+@admin_required
+def admin_delete_event(event_id):
+    validate_admin_csrf()
+    event = Evento.query.get_or_404(event_id)
+    name = event.nombre
+    db.session.delete(event)
+    db.session.commit()
+    flash(f'La feria o evento "{name}" fue eliminado.', 'success')
+    return redirect(url_for('admin_content'))
+
 
 @app.route('/publicar', methods=['GET', 'POST'])
 @login_required
@@ -992,173 +1137,6 @@ def reproductores():
 def detalle_producto(producto_id):
     producto = Producto.query.get_or_404(producto_id)
     return render_template('producto_detalle.html', producto=producto)
-
-
-@app.route('/producto/<int:producto_id>/conversacion', methods=['POST'])
-@login_required
-def iniciar_conversacion(producto_id):
-    producto = Producto.query.get_or_404(producto_id)
-    if producto.usuario_id == current_user.id:
-        flash('No puedes iniciar una conversación contigo mismo.', 'warning')
-        return redirect(url_for('detalle_producto', producto_id=producto.id))
-
-    conversacion = Conversacion.query.filter_by(
-        producto_id=producto.id,
-        comprador_id=current_user.id,
-        vendedor_id=producto.usuario_id
-    ).first()
-    if not conversacion:
-        conversacion = Conversacion(
-            producto_id=producto.id,
-            producto_nombre=producto.nombre,
-            comprador_id=current_user.id,
-            vendedor_id=producto.usuario_id
-        )
-        db.session.add(conversacion)
-        try:
-            db.session.commit()
-        except IntegrityError:
-            db.session.rollback()
-            conversacion = Conversacion.query.filter_by(
-                producto_id=producto.id,
-                comprador_id=current_user.id,
-                vendedor_id=producto.usuario_id
-            ).first()
-            if not conversacion:
-                raise
-
-    return redirect(url_for('mensajes', conversacion=conversacion.id))
-
-
-@app.route('/mensajes')
-@login_required
-def mensajes():
-    conversaciones = Conversacion.query.filter(
-        or_(
-            Conversacion.comprador_id == current_user.id,
-            Conversacion.vendedor_id == current_user.id
-        )
-    ).order_by(Conversacion.fecha_actualizacion.desc(), Conversacion.id.desc()).all()
-
-    conversation_id = request.args.get('conversacion', type=int)
-    conversacion_activa = None
-    historial = []
-    if conversation_id is not None:
-        conversacion_activa = Conversacion.query.filter(
-            Conversacion.id == conversation_id,
-            or_(
-                Conversacion.comprador_id == current_user.id,
-                Conversacion.vendedor_id == current_user.id
-            )
-        ).first_or_404()
-        historial = Mensaje.query.filter_by(conversacion_id=conversacion_activa.id) \
-            .order_by(Mensaje.fecha_creacion.desc(), Mensaje.id.desc()).limit(100).all()
-        historial.reverse()
-
-    items_conversacion = []
-    for conversacion in conversaciones:
-        contacto = (
-            conversacion.vendedor
-            if conversacion.comprador_id == current_user.id
-            else conversacion.comprador
-        )
-        ultimo_mensaje = Mensaje.query.filter_by(conversacion_id=conversacion.id) \
-            .order_by(Mensaje.fecha_creacion.desc(), Mensaje.id.desc()).first()
-        items_conversacion.append({
-            'conversacion': conversacion,
-            'contacto': contacto,
-            'ultimo_mensaje': ultimo_mensaje
-        })
-
-    return render_template(
-        'mensajes.html',
-        conversaciones=items_conversacion,
-        conversacion_activa=conversacion_activa,
-        historial=historial,
-        usuario_id=current_user.id
-    )
-
-
-def _conversacion_de_usuario(conversation_id):
-    if not current_user.is_authenticated or not isinstance(conversation_id, int):
-        return None
-    return Conversacion.query.filter(
-        Conversacion.id == conversation_id,
-        or_(
-            Conversacion.comprador_id == current_user.id,
-            Conversacion.vendedor_id == current_user.id
-        )
-    ).first()
-
-
-@socketio.on('connect')
-def handle_chat_connect(auth=None):
-    if not current_user.is_authenticated:
-        return False
-
-
-@socketio.on('join_conversation')
-def handle_join_conversation(data):
-    conversation_id = data.get('conversation_id') if isinstance(data, dict) else None
-    if not isinstance(conversation_id, int):
-        return {'ok': False, 'error': 'Conversación inválida.'}
-    conversacion = _conversacion_de_usuario(conversation_id)
-    if not conversacion:
-        return {'ok': False, 'error': 'No tienes acceso a esta conversación.'}
-    join_room(f'conversacion_{conversacion.id}')
-    return {'ok': True}
-
-
-@socketio.on('send_message')
-def handle_send_message(data):
-    if not isinstance(data, dict):
-        return {'ok': False, 'error': 'Mensaje inválido.'}
-    conversation_id = data.get('conversation_id')
-    contenido = data.get('content')
-    if not isinstance(conversation_id, int) or not isinstance(contenido, str):
-        return {'ok': False, 'error': 'Mensaje inválido.'}
-    contenido = contenido.strip()
-    if not contenido:
-        return {'ok': False, 'error': 'Escribe un mensaje antes de enviarlo.'}
-    if len(contenido) > 2000:
-        return {'ok': False, 'error': 'El mensaje no puede superar los 2000 caracteres.'}
-
-    conversacion = _conversacion_de_usuario(conversation_id)
-    if not conversacion:
-        return {'ok': False, 'error': 'No tienes acceso a esta conversación.'}
-
-    mensaje = Mensaje(
-        conversacion_id=conversacion.id,
-        remitente_id=current_user.id,
-        contenido=contenido
-    )
-    conversacion.fecha_actualizacion = datetime.utcnow()
-    db.session.add(mensaje)
-    db.session.commit()
-
-    emit('new_message', {
-        'id': mensaje.id,
-        'sender_id': current_user.id,
-        'sender_name': current_user.username,
-        'content': mensaje.contenido,
-        'created_at': mensaje.fecha_creacion.isoformat()
-    }, to=f'conversacion_{conversacion.id}')
-    return {'ok': True}
-
-
-@socketio.on('typing')
-def handle_typing(data):
-    if not isinstance(data, dict) or not isinstance(data.get('conversation_id'), int):
-        return
-    conversacion = _conversacion_de_usuario(data['conversation_id'])
-    if not conversacion:
-        return
-    emit('typing', {
-        'user_id': current_user.id,
-        'username': current_user.username,
-        'is_typing': bool(data.get('is_typing'))
-    }, to=f'conversacion_{conversacion.id}', include_self=False)
-
 
 @app.route('/producto/<int:producto_id>/quitar_venta', methods=['POST'])
 @login_required
@@ -1717,99 +1695,15 @@ OLLAMA_SYSTEM_PROMPT = (
     "Responde en español con consejos prácticos sobre alimentación, salud, reproducción, venta y crianza. "
     "Habla de forma amable y clara. Si no sabes algo, dilo honestamente y recomienda consultar a un especialista."
 )
-
-DEFAULT_OLLAMA_COMMAND = (
+OLLAMA_COMMAND = os.environ.get(
+    'OLLAMA_COMMAND',
     r'C:\Users\renzo\AppData\Local\Programs\Ollama\ollama.exe' if os.name == 'nt' else 'ollama'
 )
-
-
-def get_ollama_command():
-    command = os.environ.get('OLLAMA_COMMAND') or DEFAULT_OLLAMA_COMMAND
-    if os.path.isabs(command):
-        if os.path.exists(command):
-            return command
-        return shutil.which(command)
-    return shutil.which(command)
-
-
-def parse_ollama_list_output(output):
-    lines = output.strip().splitlines()
-    if len(lines) <= 1:
-        return []
-    models = []
-    for line in lines[1:]:
-        if not line.strip():
-            continue
-        parts = line.strip().split()
-        if parts:
-            models.append(parts[0])
-    return models
-
-
-def get_installed_ollama_models():
-    command = get_ollama_command()
-    if not command:
-        return []
-    try:
-        result = subprocess.run(
-            [command, 'list'],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=15,
-        )
-        if result.returncode != 0:
-            return []
-        return parse_ollama_list_output(result.stdout)
-    except Exception:
-        return []
-
-
-def resolve_ollama_model(model_name, installed_models=None):
-    if installed_models is None:
-        installed_models = get_installed_ollama_models()
-    if model_name in installed_models:
-        return model_name
-
-    short_name = model_name.split(':')[0]
-    for candidate in installed_models:
-        if candidate == short_name or candidate.startswith(f"{short_name}:"):
-            return candidate
-    return model_name
-
-
-def ollama_status():
-    command = get_ollama_command()
-    installed_models = get_installed_ollama_models()
-    resolved_model = resolve_ollama_model(OLLAMA_MODEL, installed_models)
-    return {
-        'ollama_command': command or '',
-        'ollama_available': bool(command),
-        'installed_models': installed_models,
-        'requested_model': OLLAMA_MODEL,
-        'resolved_model': resolved_model,
-        'model_installed': resolved_model in installed_models,
-    }
 
 
 def call_ollama(user_prompt):
     if not user_prompt:
         return None, 'El mensaje no puede estar vacío.'
-
-    command = get_ollama_command()
-    if not command:
-        return None, (
-            'Ollama no está instalado o no se encuentra su ejecutable. '
-            'Instala Ollama y configura la variable de entorno OLLAMA_COMMAND si es necesario.'
-        )
-
-    installed_models = get_installed_ollama_models()
-    resolved_model = resolve_ollama_model(OLLAMA_MODEL, installed_models)
-    if resolved_model not in installed_models:
-        return None, (
-            f'El modelo "{OLLAMA_MODEL}" no está instalado en Ollama. '
-            'Instala el modelo con `ollama pull \"{OLLAMA_MODEL}\"` o cambia OLLAMA_MODEL.'
-        )
 
     prompt = (
         f"{OLLAMA_SYSTEM_PROMPT}\n\n"
@@ -1817,31 +1711,18 @@ def call_ollama(user_prompt):
         f"IA: "
     )
 
-    try:
-        result = subprocess.run(
-            [command, 'run', resolved_model, prompt],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=int(os.environ.get('OLLAMA_TIMEOUT', 60)),
-        )
-    except subprocess.TimeoutExpired:
-        return None, (
-            'La llamada a Ollama excedió el tiempo de espera. '
-            'Aumenta OLLAMA_TIMEOUT o prueba con un modelo más liviano.'
-        )
-    except Exception as e:
-        return None, f'Error al ejecutar Ollama: {e}'
+    result = subprocess.run(
+        [OLLAMA_COMMAND, "run", OLLAMA_MODEL, prompt],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
     if result.returncode != 0:
         error_text = result.stderr.strip() or 'Error al ejecutar Ollama.'
         return None, error_text
 
-    output = result.stdout.strip()
-    if not output:
-        return None, 'Ollama devolvió una respuesta vacía.'
-
-    return output, None
+    return result.stdout.strip(), None
 
 
 @app.route('/api/chat', methods=['POST'])
@@ -1858,14 +1739,9 @@ def api_chat():
     return {'response': response_text}
 
 
-@app.route('/api/ollama-status')
-def api_ollama_status():
-    return ollama_status()
-
-
 @app.route('/asistente-ia')
 def asistente_ia():
-    return render_template('asistente_ia.html', ollama_status=ollama_status())
+    return render_template('asistente_ia.html')
 
 
 def load_markdown_subconejos():
@@ -2016,8 +1892,17 @@ def sync_global_sources_from_json():
 
 def initialize_app():
     with app.app_context():
-        db.create_all()
-        ensure_producto_columns()
+        try:
+            db.create_all()
+        except Exception:
+            pass
+
+        try:
+            ensure_producto_columns()
+        except Exception:
+            pass
+
+        ensure_user_columns()
 
         try:
             seed_default_consejos()
@@ -2034,7 +1919,7 @@ def initialize_app():
         except Exception:
             pass
 
-        if not VERCEL_DEPLOY and not SCHEDULER_ENABLED:
+        if not VERCEL_DEPLOY:
             try:
                 update_all_sources()
             except Exception:
@@ -2042,14 +1927,8 @@ def initialize_app():
 
 initialize_app()
 
-if SCHEDULER_ENABLED:
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=update_all_sources, trigger='interval', minutes=15, next_run_time=datetime.now())
-    scheduler.start()
-
 if __name__ == '__main__':
-    socketio.run(
-        app,
+    app.run(
         host='0.0.0.0',
         port=int(os.environ.get('PORT', 5000)),
         debug=os.environ.get('FLASK_DEBUG', 'False').lower() in ('1', 'true', 'yes')

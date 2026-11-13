@@ -18,14 +18,16 @@
                     <i class="fas fa-user"></i>
                     <span>Perfil</span>
                 </a>
-                <a href="{{ url_for('mensajes') }}" class="footer-nav-item {% if active_page == 'mensajes' %}active{% endif %}">
-                    <i class="fas fa-comments"></i>
-                    <span>Mensajes</span>
-                </a>
                 <a href="{{ url_for('registro_animales') }}" class="footer-nav-item {% if active_page == 'registro_animales' %}active{% endif %}">
                     <i class="fas fa-paw"></i>
                     <span>Registro</span>
                 </a>
+                {% if current_user.is_admin %}
+                    <a href="{{ url_for('admin') }}" class="footer-nav-item {% if active_page == 'admin' %}active{% endif %}">
+                        <i class="fas fa-shield-alt"></i>
+                        <span>Admin</span>
+                    </a>
+                {% endif %}
             {% else %}
                 <a href="{{ url_for('login') }}" class="footer-nav-item">
                     <i class="fas fa-user"></i>

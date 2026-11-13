@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Moderar contenido - Yamitas</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="bg-light">
+<header class="navbar-custom">
+    <div class="container py-3 d-flex justify-content-between align-items-center">
+        <h1 class="h4 mb-0">Moderar contenido</h1>
+        <a href="{{ url_for('admin') }}" class="btn btn-outline-primary btn-sm">Volver a usuarios</a>
+    </div>
+</header>
+
+<main class="container py-4">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+            <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Cerrar"></button>
+            </div>
+        {% endfor %}
+    {% endwith %}
+
+    <p class="text-muted">Se muestran hasta 100 elementos recientes por sección. Eliminar un elemento no elimina la cuenta de su autor.</p>
+
+    <section class="mb-5">
+        <h2 class="h5">Animales registrados ({{ animals|length }})</h2>
+        <div class="table-responsive card">
+            <table class="table table-striped align-middle mb-0">
+                <thead><tr><th>Animal</th><th>Raza</th><th>Usuario</th><th>Acción</th></tr></thead>
+                <tbody>
+                    {% for animal in animals %}
+                    <tr>
+                        <td>{{ animal.nombre }}</td>
+                        <td>{{ animal.raza }}</td>
+                        <td>{{ animal.usuario.username if animal.usuario else 'Usuario eliminado' }}</td>
+                        <td>
+                            <form method="post" action="{{ url_for('admin_delete_animal', animal_id=animal.id) }}" onsubmit="return confirm('¿Eliminar este animal? Esta acción no se puede deshacer.');">
+                                <input type="hidden" name="csrf_token" value="{{ admin_csrf_token() }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Eliminar</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% else %}<tr><td colspan="4" class="text-center text-muted">No hay animales registrados.</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="mb-5">
+        <h2 class="h5">Publicaciones ({{ publications|length }})</h2>
+        <div class="table-responsive card">
+            <table class="table table-striped align-middle mb-0">
+                <thead><tr><th>Nombre</th><th>Tipo</th><th>Usuario</th><th>Acción</th></tr></thead>
+                <tbody>
+                    {% for publication in publications %}
+                    <tr>
+                        <td>{{ publication.nombre }}</td>
+                        <td>{{ publication.tipo }}</td>
+                        <td>{{ publication.usuario.username if publication.usuario else 'Usuario eliminado' }}</td>
+                        <td>
+                            <form method="post" action="{{ url_for('admin_delete_publication', publication_id=publication.id) }}" onsubmit="return confirm('¿Eliminar esta publicación? Esta acción no se puede deshacer.');">
+                                <input type="hidden" name="csrf_token" value="{{ admin_csrf_token() }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Eliminar</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% else %}<tr><td colspan="4" class="text-center text-muted">No hay publicaciones.</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="mb-5">
+        <h2 class="h5">Ferias y eventos ({{ events|length }})</h2>
+        <div class="table-responsive card">
+            <table class="table table-striped align-middle mb-0">
+                <thead><tr><th>Evento</th><th>Fecha</th><th>Ubicación</th><th>Acción</th></tr></thead>
+                <tbody>
+                    {% for event in events %}
+                    <tr>
+                        <td>{{ event.nombre }}</td>
+                        <td>{{ event.fecha.strftime('%d/%m/%Y') if event.fecha else '—' }}</td>
+                        <td>{{ event.ubicacion or '—' }}</td>
+                        <td>
+                            <form method="post" action="{{ url_for('admin_delete_event', event_id=event.id) }}" onsubmit="return confirm('¿Eliminar esta feria o evento? Esta acción no se puede deshacer.');">
+                                <input type="hidden" name="csrf_token" value="{{ admin_csrf_token() }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Eliminar</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% else %}<tr><td colspan="4" class="text-center text-muted">No hay ferias o eventos.</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</main>
+
+{% include "_footer.html" %}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
