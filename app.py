@@ -253,6 +253,19 @@ def serve_upload(filename):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
+
+@app.route('/healthz')
+def healthz():
+    try:
+        db.session.execute(text('SELECT 1'))
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception('Health check failed: database is unavailable')
+        return {'status': 'error', 'database': 'unavailable'}, 503
+
+    return {'status': 'ok'}, 200
+
+
 # ==================== RUTAS ====================
 @app.route('/debug/static-check')
 def debug_static_check():
